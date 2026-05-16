@@ -230,7 +230,11 @@ try:
             api_key,
         )
 except Exception as e:
-    st.error(f"LLM-вызов не удался: {e}. Проверь ANTHROPIC_API_KEY в .env.")
+    st.error(
+        f"LLM-вызов не удался: {e}\n\n"
+        f"Проверь что ключ Anthropic корректный и на балансе есть credits "
+        f"(вводи/перезапиши его в разделе «🔑 Anthropic API key» в шапке)."
+    )
     narr = None
 
 

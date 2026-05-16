@@ -191,7 +191,7 @@ def build_narrative(
     schema["required"] = NARRATIVE_REQUIRED
 
     from anthropic import Anthropic
-    client = Anthropic(api_key=ANTHROPIC_API_KEY)
+    client = Anthropic(api_key=key)
 
     resp = client.messages.create(
         model=ANTHROPIC_MODEL,
