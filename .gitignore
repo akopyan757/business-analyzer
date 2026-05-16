@@ -39,6 +39,7 @@ cache/
 
 # Streamlit
 .streamlit/secrets.toml
+.streamlit/secrets.toml.local
 
 # Jupyter
 .ipynb_checkpoints/
