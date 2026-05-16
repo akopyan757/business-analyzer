@@ -70,21 +70,29 @@ st.title("🔎 Business Analyzer")
 st.caption("Загружай тикер или 10-K — получай дашборд про бизнес на языке новичка.")
 
 # ── API key (Anthropic) ────────────────────────────────────────────────────
-with st.expander("🔑 Anthropic API key" + (" — ✅ загружен из .env" if ENV_API_KEY else " — ⚠️ не задан"),
-                 expanded=not bool(ENV_API_KEY)):
+_have_env_key = bool(ENV_API_KEY)
+with st.expander(
+    "🔑 Anthropic API key" + (" — ✅ загружен из конфига" if _have_env_key else " — ⚠️ нужен для анализа (твой собственный)"),
+    expanded=not _have_env_key,
+):
     st.markdown(
-        "Получить ключ: [console.anthropic.com/settings/keys](https://console.anthropic.com/settings/keys). "
-        "Пополнить баланс: [billing](https://console.anthropic.com/settings/billing). "
-        "Один анализ ≈ 1-2 цента (Haiku 4.5)."
+        "**Это публичный дашборд — для генерации нарратива нужен твой собственный Anthropic API key.** "
+        "Каждый посетитель использует свой ключ, разработчик ничего не платит за твои запросы.\n\n"
+        "**Как получить (5 минут):**\n"
+        "1. Зарегистрироваться на [console.anthropic.com](https://console.anthropic.com/settings/keys)\n"
+        "2. Settings → API keys → Create Key (скопировать `sk-ant-...`)\n"
+        "3. Settings → Billing → Buy credits (минимум \\$5)\n"
+        "4. Вставить ключ в поле ниже\n\n"
+        "💰 **Стоимость**: один анализ ≈ 1-2 цента (Claude Haiku 4.5). На \\$5 хватит ~250 тикеров."
     )
     typed_key = st.text_input(
         "API key", value="", type="password",
-        placeholder=("Ключ загружен из .env, перезаписать необязательно" if ENV_API_KEY else "sk-ant-..."),
-        help="Сохраняется только в текущей сессии, не записывается на диск.",
+        placeholder=("Ключ уже загружен — перезаписать необязательно" if _have_env_key else "sk-ant-..."),
+        help="Сохраняется только в текущей сессии браузера. На сервер/диск не записывается.",
     )
     if typed_key:
         st.session_state["api_key"] = typed_key
-    elif ENV_API_KEY and "api_key" not in st.session_state:
+    elif _have_env_key and "api_key" not in st.session_state:
         st.session_state["api_key"] = ENV_API_KEY
 
 api_key = st.session_state.get("api_key", "")
