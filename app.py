@@ -97,9 +97,13 @@ with st.expander(
 
 api_key = st.session_state.get("api_key", "")
 
+# Тикер из URL ?ticker=AAPL — для шеринга прямых ссылок
+url_ticker = st.query_params.get("ticker", "").strip().upper()
+default_ticker = url_ticker or "AAPL"
+
 col1, col2, col3 = st.columns([2, 3, 1])
 with col1:
-    ticker = st.text_input("Тикер", value="AAPL", help="Например AAPL, MSFT, KO").strip().upper()
+    ticker = st.text_input("Тикер", value=default_ticker, help="Например AAPL, MSFT, KO").strip().upper()
 with col2:
     uploaded = st.file_uploader("Или загрузи 10-K (PDF/HTML)", type=["pdf", "html", "htm"])
 with col3:
@@ -107,13 +111,20 @@ with col3:
     st.write("")
     go = st.button("Разобрать компанию", type="primary", use_container_width=True)
 
-if not api_key:
-    st.error("❌ Anthropic API key не задан. Введи его в разделе «🔑 Anthropic API key» выше или добавь в `.env`.")
+# Авто-триггер если в URL есть ?ticker= и мы ещё не запускали для него
+auto_triggered = False
+if url_ticker and st.session_state.get("last_url_ticker") != url_ticker:
+    auto_triggered = True
+    st.session_state["last_url_ticker"] = url_ticker
+
+if not go and not auto_triggered:
+    st.info("Введи тикер и нажми «Разобрать компанию». "
+            "Первый запуск тикера займёт ~30 сек (загрузка отчётов + LLM-анализ если введён ключ).")
     st.stop()
 
-if not go and "narrative" not in st.session_state:
-    st.info("Введи тикер и нажми «Разобрать компанию». Первый запуск тикера займёт ~30 сек (загрузка отчётов + LLM-анализ).")
-    st.stop()
+# Сохраняем тикер в URL для шеринга
+if ticker and ticker != url_ticker:
+    st.query_params["ticker"] = ticker
 
 
 # ─────────────────────────── DATA PIPELINE ────────────────────────────────────
@@ -213,29 +224,35 @@ if data["annual"] is not None and not data["annual"].empty:
 
 waterfall_dict = data["waterfall"].__dict__ if data["waterfall"] else {}
 
-try:
-    with st.spinner("Генерирую нарратив через Claude..."):
-        narr = gen_narrative(
-            ticker, data["company"], sector,
-            data["metrics"], multiples_summary, waterfall_dict,
-            history_summary, comparison,
-            data["sections"].get("business", ""),
-            data["sections"].get("risks", ""),
-            data["sections"].get("mdna", ""),
-            # Передаём структурированную таблицу (если нашлась) + raw текст ноты
-            (
-                ("STRUCTURED TABLE (use these exact numbers):\n" + data["sections"]["segments_tables"] + "\n\n---\n\n")
-                if data["sections"].get("segments_tables") else ""
-            ) + "RAW NOTE TEXT (fallback):\n" + data["sections"].get("segments", ""),
-            api_key,
+narr = None
+if api_key:
+    try:
+        with st.spinner("Генерирую нарратив через Claude..."):
+            narr = gen_narrative(
+                ticker, data["company"], sector,
+                data["metrics"], multiples_summary, waterfall_dict,
+                history_summary, comparison,
+                data["sections"].get("business", ""),
+                data["sections"].get("risks", ""),
+                data["sections"].get("mdna", ""),
+                (
+                    ("STRUCTURED TABLE (use these exact numbers):\n" + data["sections"]["segments_tables"] + "\n\n---\n\n")
+                    if data["sections"].get("segments_tables") else ""
+                ) + "RAW NOTE TEXT (fallback):\n" + data["sections"].get("segments", ""),
+                api_key,
+            )
+    except Exception as e:
+        st.error(
+            f"LLM-вызов не удался: {e}\n\n"
+            f"Проверь что ключ Anthropic корректный и на балансе есть credits "
+            f"(вводи/перезапиши его в разделе «🔑 Anthropic API key» в шапке)."
         )
-except Exception as e:
-    st.error(
-        f"LLM-вызов не удался: {e}\n\n"
-        f"Проверь что ключ Anthropic корректный и на балансе есть credits "
-        f"(вводи/перезапиши его в разделе «🔑 Anthropic API key» в шапке)."
+else:
+    st.info(
+        "ℹ️ **Режим без LLM** — без Anthropic ключа показываем только цифры из EDGAR/finviz "
+        "(waterfall, метрики, мультипликаторы, сегменты из 10-K). Тексты-объяснения, "
+        "риски и итоговый вердикт не генерируются — введи ключ в шапке для full features."
     )
-    narr = None
 
 
 # ─────────────────────────── 1. INTRO ─────────────────────────────────────────
@@ -273,15 +290,18 @@ with st.container(border=True):
     seg_left, seg_right = st.columns([3, 2])
     with seg_left:
         seg_data = {}
-        if narr and narr.segments:
+        if narr and narr.segments and any(s.revenue_share_pct > 0 for s in narr.segments):
             seg_data = {s.name: s.revenue_share_pct for s in narr.segments}
+        elif data["sections"].get("segments_dict"):
+            # Парсинг из HTML-таблицы 10-K (NOTE 20) — работает без LLM
+            seg_data = data["sections"]["segments_dict"]
         elif data["segments_xbrl"]:
             seg_data = data["segments_xbrl"]
         fig = segment_pie(seg_data)
         if fig:
             st.plotly_chart(fig, use_container_width=True)
         else:
-            st.info("Сегментная разбивка не извлечена.")
+            st.info("Сегментная разбивка не извлечена из 10-K.")
 
     with seg_right:
         if narr and narr.segments:
@@ -434,32 +454,32 @@ with st.container(border=True):
 
 # ─────────────────────────── 7. RISKS ─────────────────────────────────────────
 
-with st.container(border=True):
-    card_title("⚠️", "Что может всё сломать?",
-               "Главные риски из Item 1A — на человеческом языке")
+# Эти 3 секции имеют смысл только когда есть LLM-нарратив — скрываем без ключа
+if narr:
+    with st.container(border=True):
+        card_title("⚠️", "Что может всё сломать?",
+                   "Главные риски из Item 1A — на человеческом языке")
 
-    if narr and narr.risks:
-        for r in narr.risks:
-            icon = "🔴" if r.severity == "high" else "🟡"
-            st.markdown(f"{icon} **{esc(r.title)}** — {esc(r.explanation)}")
-    else:
-        st.info("Риски не сгенерированы.")
+        if narr.risks:
+            for r in narr.risks:
+                icon = "🔴" if r.severity == "high" else "🟡"
+                st.markdown(f"{icon} **{esc(r.title)}** — {esc(r.explanation)}")
 
-    if narr:
         safe_write(narr.risks_block.body)
         bridge(narr.risks_block.bridge_next)
 
 
 # ─────────────────────────── 8. OUTLOOK ───────────────────────────────────────
 
-with st.container(border=True):
-    card_title("🗣️", "Что говорит руководство?",
-               "Выжимка из MD&A — что улучшилось, ухудшилось, планы")
+if narr:
+    with st.container(border=True):
+        card_title("🗣️", "Что говорит руководство?",
+                   "Выжимка из MD&A — что улучшилось, ухудшилось, планы")
 
-    if narr and narr.outlook_bullets:
-        for b in narr.outlook_bullets:
-            icon = {"positive": "✅", "negative": "🔻", "plan": "🎯"}.get(b.label, "•")
-            st.markdown(f"{icon} {esc(b.text)}")
+        if narr.outlook_bullets:
+            for b in narr.outlook_bullets:
+                icon = {"positive": "✅", "negative": "🔻", "plan": "🎯"}.get(b.label, "•")
+                st.markdown(f"{icon} {esc(b.text)}")
 
     if narr:
         safe_write(narr.outlook.body)
@@ -468,9 +488,9 @@ with st.container(border=True):
 
 # ─────────────────────────── 9. VERDICT ───────────────────────────────────────
 
-with st.container(border=True):
-    card_title("🎯", "Итог", "Собираем всё в один вывод")
-    if narr:
+if narr:
+    with st.container(border=True):
+        card_title("🎯", "Итог", "Собираем всё в один вывод")
         labels = {"green": "Качественный бизнес", "yellow": "Со звёздочкой", "red": "Слабый / рискованный"}
         st.markdown(
             traffic_light_html(narr.traffic_light, labels.get(narr.traffic_light, "")),
@@ -488,4 +508,11 @@ with st.expander("📚 Глоссарий — все термины просты
         safe = defn.replace("$", "\\$")
         st.markdown(f"**{term}** — {safe}")
 
-st.caption(f"Источник: SEC EDGAR · finviz · Anthropic Claude. Тикер: {ticker} · CIK: {data['cik']}")
+st.markdown("---")
+share_col1, share_col2 = st.columns([3, 2])
+with share_col1:
+    st.markdown(f"**🔗 Поделиться отчётом**: вставь URL друзьям — у них откроется тот же тикер.")
+    st.code(f"https://business-analyzer-cheesecake.streamlit.app/?ticker={ticker}", language=None)
+with share_col2:
+    st.caption(f"Источник: SEC EDGAR · finviz" + (" · Anthropic Claude" if narr else "") +
+               f"  \nТикер: {ticker} · CIK: {data['cik']}")

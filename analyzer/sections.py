@@ -78,15 +78,31 @@ def _find_section(text: str, start_patterns: list[re.Pattern], end_patterns: lis
     return text[start:end].strip()[:max_chars]
 
 
-def extract_sections(html: str) -> dict[str, str]:
+def extract_sections(html: str) -> dict:
     text = html_to_text(html)
-    out = {}
+    out: dict = {}
     for key, starts in SECTION_PATTERNS.items():
         # Сегментная нота — короткая (15К), остальные секции до 60К
         max_chars = 15000 if key == "segments" else 60000
         out[key] = _find_section(text, starts, END_PATTERNS[key], max_chars=max_chars)
-    # Дополнительно — структурированные таблицы сегментной выручки из HTML
+    # Структурированные таблицы сегментной выручки из HTML — текст для LLM
     out["segments_tables"] = extract_segments_tables(html)
+    # Готовый dict сегментов для UI без LLM (та же логика, другой формат)
+    out["segments_dict"] = parse_segments_dict(html)
+    return out
+
+
+def parse_segments_dict(html: str) -> dict[str, float]:
+    """Возвращает {segment_name: revenue_million_usd} из сегментной таблицы 10-K.
+    Не включает агрегаты (Total, Consolidated, Eliminations). {} если не нашлось.
+    """
+    inner = _parse_segments_raw(html)
+    if not inner:
+        return {}
+    result, total, corporate = inner
+    out = dict(result)
+    if corporate:
+        out["Corporate"] = corporate
     return out
 
 
@@ -101,6 +117,22 @@ def extract_segments_tables(html: str) -> str:
 
     Этот формат Claude парсит идеально и не путается с merged cells.
     """
+    inner = _parse_segments_raw(html)
+    if not inner:
+        return ""
+    result, total, corporate = inner
+    lines = ["Operating Segments revenue (latest fiscal year, USD millions):"]
+    for name, val in sorted(result.items(), key=lambda x: -x[1]):
+        lines.append(f"- {name}: {val:,.0f}")
+    if corporate:
+        lines.append(f"- Corporate: {corporate:,.0f}")
+    if total:
+        lines.append(f"Total: {total:,.0f}")
+    return "\n".join(lines)
+
+
+def _parse_segments_raw(html: str):
+    """Internal: returns (result_dict, total, corporate) or None."""
     try:
         import pandas as pd
         from io import StringIO
@@ -208,7 +240,7 @@ def extract_segments_tables(html: str) -> str:
         if len(result) < 3:
             continue
 
-        # Форматируем — отделяем агрегаты от настоящих сегментов
+        # Отделяем агрегаты от настоящих сегментов
         AGGREGATE_KEYS = ("Consolidated", "Operating Segments Total",
                           "Total Operating Segments", "Total Reportable Segments",
                           "Total", "Eliminations")
@@ -218,17 +250,9 @@ def extract_segments_tables(html: str) -> str:
             if v and (total is None or v > total):
                 total = v
         corporate = result.pop("Corporate", None)
+        return result, total, corporate
 
-        lines = ["Operating Segments revenue (latest fiscal year, USD millions):"]
-        for name, val in sorted(result.items(), key=lambda x: -x[1]):
-            lines.append(f"- {name}: {val:,.0f}")
-        if corporate:
-            lines.append(f"- Corporate: {corporate:,.0f}")
-        if total:
-            lines.append(f"Total: {total:,.0f}")
-        return "\n".join(lines)
-
-    return ""
+    return None
 
 
 def extract_from_pdf(pdf_path: str) -> dict[str, str]:
